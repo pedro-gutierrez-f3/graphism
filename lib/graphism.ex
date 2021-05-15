@@ -10,6 +10,8 @@ defmodule Graphism do
   require Logger
 
   defmacro __using__(opts \\ []) do
+    Code.compiler_options(ignore_module_conflict: true)
+
     alias Dataloader, as: DL
 
     repo = opts[:repo]
@@ -79,6 +81,18 @@ defmodule Graphism do
       __CALLER__.module
       |> Module.get_attribute(:repo)
 
+    unless length(schema) > 0 do
+      raise """
+        Your Graphism schema is empty. Please define at least
+        one entity:
+
+        entity :my_entity do
+          attribute :id, :id
+          attribute :name, :string
+        end 
+      """
+    end
+
     schema_fun =
       quote do
         def schema do
@@ -97,6 +111,13 @@ defmodule Graphism do
         raise "Entity #{e[:name]} is empty"
       end
     end)
+
+
+    schema_empty_modules =
+      schema
+      |> Enum.map(fn e ->
+        schema_empty_module(e, schema, caller: __CALLER__)
+      end)
 
     schema_modules =
       schema
@@ -148,6 +169,7 @@ defmodule Graphism do
 
     List.flatten([
       schema_fun,
+      schema_empty_modules,
       schema_modules,
       api_modules,
       resolver_modules,
@@ -365,6 +387,13 @@ defmodule Graphism do
       end)
 
     Keyword.put(e, :relations, relations)
+  end
+
+  defp schema_empty_module(e, _schema, _opts) do
+    quote do
+      defmodule unquote(e[:schema_module]) do
+      end
+    end
   end
 
   defp schema_module(e, schema, _opts) do
