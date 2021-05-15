@@ -5,9 +5,6 @@ defmodule Graphism.Migrations do
   """
   require Logger
 
-  @migrations_dir Path.join([File.cwd!(), "priv/repo/migrations"])
-  @migrations Path.join([@migrations_dir, "*_graphism_*.exs"])
-
   @doc """
   Generate migrations for the given schema.
 
@@ -15,7 +12,10 @@ defmodule Graphism.Migrations do
   def generate(module: mod) do
     schema = mod.schema()
 
-    migrations = existing_migrations()
+    migrations_dir = Path.join([File.cwd!(), "priv/repo/migrations"])
+    migrations_files = Path.join([migrations_dir, "*_graphism_*.exs"])
+
+    migrations = existing_migrations(migrations_files)
 
     existing_migrations =
       read_migrations(migrations)
@@ -31,7 +31,7 @@ defmodule Graphism.Migrations do
         schema_migration
       )
 
-    write_migration(missing_migrations, last_migration_version + 1, dir: File.cwd!())
+    write_migration(missing_migrations, last_migration_version + 1, dir: migrations_dir)
   end
 
   defp migration_from_schema(schema) do
@@ -330,8 +330,8 @@ defmodule Graphism.Migrations do
     [column: col, type: spec[:type], opts: spec[:opts], action: action, kind: :column]
   end
 
-  defp existing_migrations() do
-    @migrations
+  defp existing_migrations(migrations) do
+    migrations
     |> Path.wildcard()
     |> Enum.sort()
     |> Enum.map(&File.read!(&1))
@@ -725,7 +725,7 @@ defmodule Graphism.Migrations do
 
     up =
       migration
-      |> Enum.sort(&sort_migration(&1, &2))
+      |> sort_migrations()
       |> Enum.map(&quote_migration(&1))
 
     code =
@@ -741,9 +741,6 @@ defmodule Graphism.Migrations do
     path =
       Path.join([
         opts[:dir],
-        "priv",
-        "repo",
-        "migrations",
         "#{timestamp}_graphism_v#{version}.exs"
       ])
 
@@ -751,32 +748,70 @@ defmodule Graphism.Migrations do
     IO.puts("Written #{path}")
   end
 
-  # Sort migrations depending on whether one references another
-  # so that we apply top level migration first (ie a table that does not
-  # depend on other tables) and dependent tables after
-  defp sort_migration(m1, m2) do
-    not depends(m1, m2)
+  defp table_references(m) do
+    m[:columns]
+    |> Enum.map(fn col ->
+      col[:opts][:references]
+    end)
+    |> Enum.reject(fn table -> table == nil end)
   end
 
-  # Figure out whether child migration depends on parent
-  defp depends(child, parent) do
-    case child[:kind] do
-      :table ->
-        # we are dealing with a table
-        # See if there is a foreign reference to the parent
-        not (child[:columns]
-             |> Enum.filter(fn col ->
-               col[:opts][:references] == parent[:table]
-             end)
-             |> Enum.empty?())
+  defp tables_graph(migrations) do
+    tables =
+      migrations
+      |> Enum.filter(fn m -> m[:kind] == :table end)
 
-      :index ->
-        # We are dealing with an index
-        child[:table] == parent[:table]
+    graph =
+      Enum.reduce(tables, Graph.new(), fn m, g ->
+        Graph.add_vertex(g, m[:table])
+      end)
 
-      :enum ->
-        false
-    end
+    Enum.reduce(tables, graph, fn m, g ->
+      m
+      |> table_references()
+      |> Enum.reduce(g, fn parent, g ->
+        Graph.add_edge(g, m[:table], parent)
+      end)
+    end)
+  end
+
+  defp table_index(tables, tab) do
+    {^tab, index} = Enum.find(tables, fn {t, _} -> tab == t end)
+    index
+  end
+
+  # Sort migrations so that:
+  #
+  # * enums (types) are defined first
+  # * then tables, with top level tables first
+  # * then indices
+  defp sort_migrations(migrations) do
+    tables =
+      migrations
+      |> tables_graph()
+      |> Graph.topsort()
+      |> Enum.with_index()
+
+    migrations
+    |> Enum.map(fn m ->
+      case m[:kind] do
+        :table ->
+          {m, table_index(tables, m[:table])}
+
+        :enum ->
+          {m, 1000}
+
+        :index ->
+          {m, -1000}
+      end
+    end)
+    |> Enum.sort(fn
+      {_, ref1}, {_, ref2} ->
+        ref1 > ref2
+    end)
+    |> Enum.map(fn {m, _} ->
+      m
+    end)
   end
 
   defp migration_module(name, up) do
