@@ -147,12 +147,16 @@ defmodule Graphism.Migrations do
     end
   end
 
+  defp optional?(attr) do
+    Enum.member?(attr[:opts][:modifiers] || [], :optional)
+  end
+
   defp column_opts_with_null(opts, attr) do
-    case attr[:opts][:optional] do
-      nil ->
+    case optional?(attr) do
+      false ->
         Keyword.put(opts, :null, false)
 
-      _ ->
+      true ->
         opts
     end
   end

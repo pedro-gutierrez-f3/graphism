@@ -413,6 +413,10 @@ defmodule Graphism do
     Enum.member?(entity[:opts][:modifiers] || [], :internal)
   end
 
+  defp secret?(attr) do
+    Enum.member?(attr[:opts][:modifiers] || [], :secret)
+  end
+
   # Resolves the given schema, by inspecting links between entities
   # and making sure everything is consistent
   defp resolve(schema) do
@@ -567,6 +571,7 @@ defmodule Graphism do
         @required_fields unquote(
                            (e[:attributes]
                             |> Enum.reject(&readonly?(&1))
+                            |> Enum.reject(&optional?(&1))
                             |> Enum.map(fn attr ->
                               attr[:name]
                             end)) ++
@@ -577,10 +582,24 @@ defmodule Graphism do
                               end))
                          )
 
+        @optional_fields unquote(
+                           (e[:attributes]
+                            |> Enum.filter(&optional?(&1))
+                            |> Enum.map(fn attr ->
+                              attr[:name]
+                            end)) ++
+                             (e[:relations]
+                              |> Enum.filter(fn rel -> rel[:kind] == :has_one end)
+                              |> Enum.map(fn rel ->
+                                String.to_atom("#{rel[:name]}_id")
+                              end))
+                         )
+
         def changeset(e, attrs) do
           changes =
             e
             |> cast(attrs, @required_fields)
+            |> cast(attrs, @optional_fields)
             |> validate_required(@required_fields)
             |> unique_constraint(:id, name: unquote("#{e[:table]}_pkey"))
 
@@ -829,8 +848,12 @@ defmodule Graphism do
     quote do
       defmodule unquote(e[:resolver_module]) do
         def transform_arg(args, arg_name, mod) do
-          with {:ok, new_value} <- mod.apply(Map.fetch!(args, arg_name)) do
-            {:ok, Map.put(args, arg_name, new_value)}
+          case Map.fetch(args, arg_name) do
+            :error ->
+              args
+
+            {:ok, v} ->
+              {:ok, Map.put(args, arg_name, v)}
           end
         end
 
@@ -1066,7 +1089,7 @@ defmodule Graphism do
         (unquote_splicing(
            # Add a field for each attribute.
            (e[:attributes]
-            |> Enum.reject(&internal?(&1))
+            |> Enum.reject(&secret?(&1))
             |> Enum.map(fn attr ->
               # determine the kind for this field, depending
               # on whether it is an enum or not
@@ -1242,6 +1265,10 @@ defmodule Graphism do
     Enum.member?(attr[:opts][:modifiers] || [], :readonly)
   end
 
+  defp optional?(attr) do
+    Enum.member?(attr[:opts][:modifiers] || [], :optional)
+  end
+
   defp graphql_create_mutation(e, _schema) do
     return_type =
       case e[:actions][:create] do
@@ -1263,7 +1290,20 @@ defmodule Graphism do
              kind = attr_graphql_type(e, attr)
 
              quote do
-               arg(unquote(attr[:name]), non_null(unquote(kind)))
+               arg(
+                 unquote(attr[:name]),
+                 unquote(
+                   case optional?(attr) do
+                     true ->
+                       kind
+
+                     false ->
+                       quote do
+                         non_null(unquote(kind))
+                       end
+                   end
+                 )
+               )
              end
            end)) ++
             (e[:relations]
@@ -1285,20 +1325,25 @@ defmodule Graphism do
       @desc unquote("Update an existing #{e[:display_name]}")
       field :update, non_null(unquote(e[:name])) do
         unquote_splicing(
-          (e[:attributes]
-           |> Enum.reject(fn attr ->
-             Enum.member?(attr[:opts][:modifiers] || [], :readonly)
-           end)
-           |> Enum.map(fn attr ->
-             quote do
-               arg(unquote(attr[:name]), non_null(unquote(attr[:kind])))
-             end
-           end)) ++
+          [
+            quote do
+              arg(:id, non_null(:id))
+            end
+          ] ++
+            (e[:attributes]
+             |> Enum.reject(fn attr ->
+               attr[:name] == :id || Enum.member?(attr[:opts][:modifiers] || [], :readonly)
+             end)
+             |> Enum.map(fn attr ->
+               quote do
+                 arg(unquote(attr[:name]), unquote(attr[:kind]))
+               end
+             end)) ++
             (e[:relations]
              |> Enum.filter(fn rel -> :belongs_to == rel[:kind] || :has_one == rel[:kind] end)
              |> Enum.map(fn rel ->
                quote do
-                 arg(unquote(rel[:name]), non_null(:id))
+                 arg(unquote(rel[:name]), :id)
                end
              end))
         )
